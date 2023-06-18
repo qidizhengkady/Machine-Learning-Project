@@ -1,0 +1,521 @@
+---
+title: "Polo Final"
+output: html_notebook
+---
+
+
+```{r, warning=FALSE, message=FALSE}
+
+options(scipen = 9999)
+
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(skimr)
+library(kableExtra)
+library(GGally)
+library(kableExtra) # -- make nice looking resutls when we knitt 
+library(vip)        # --  tidymodels variable importance
+library(fastshap)   # -- shapley values for variable importance 
+library(rpart.plot) # -- plotting decision trees 
+library(ranger) 
+library(solitude)
+library(ggpubr)
+library(lubridate)
+library(stringr)
+library(rpart.plot)
+library(rpart)
+library(DALEX)
+library(DALEXtra)
+library(readxl)
+
+```
+
+#Impot Data
+```{r}
+
+polo <- read_xlsx("D://wfu/Practicum/Model/data/SKU_Data-fit_added.xlsx") %>%
+  clean_names()
+
+skim(polo)
+head(polo)
+
+```
+
+#Prep Data for Analysis
+```{r}
+#Focus - Womens Tops
+prep <- polo %>%
+  filter(global_plan_l4 %in% c("POLO SHIRT", "SWEATERS", "T SHIRTS", "SHIRTS")) %>%
+  filter(global_plan_l1 == "WOMENS") %>%
+  filter(fashion_degree %in% c("SEASONAL", "CORE", "SEASONAL CORE")) %>%
+  filter(super_color != "'-1") %>%
+  filter(logo %in% c("RL METAL", "MONOGRAM", "NO LOGO", "RL (EMBROIDERY)", "BRANDED", "LRL MONOGRAM", "NOVELTY",
+                     "OTHER BRANDING", "SMALL PLAYER", "BIG PLAYER","POLO BEAR","RANCH BRAND")) %>% 
+  filter(material_group %in% c("KNITS", "SWEATERS", "WOVENS")) %>% 
+  mutate(productive = if_else(global_sku_score %in% c(1,2,3,4), "1", "0")) %>%
+  mutate(unproductive = if_else(global_sku_score %in% c(10,12), "1", "0")) %>%
+  mutate(JERSEY = if_else(str_detect(merch_fabrication, "JERSEY"), "Y", "N")) %>%
+  mutate(MESH = if_else(str_detect(merch_fabrication, "MESH"), "Y", "N")) %>%
+  mutate(INTERLOCK = if_else(str_detect(merch_fabrication, "INTERLOCK"), "Y", "N")) %>%
+  mutate(TWILL = if_else(str_detect(merch_fabrication, "TWILL"), "Y", "N")) %>%
+  #mutate(FLEECE = if_else(str_detect(merch_fabrication, "FLEECE"), "Y", "N")) %>%
+  mutate(OXFORD = if_else(str_detect(merch_fabrication, "OXFORD"), "Y", "N")) %>%
+  mutate(COTTON = if_else(str_detect(merch_fabrication, "COTTON"), "Y", "N")) %>%
+  mutate(OXFORD = if_else(str_detect(merch_fabrication, "OXFORD"), "Y", "N")) %>%
+  #mutate(DBL_KNIT = if_else(str_detect(merch_fabrication, "DBL KNIT"), "Y", "N")) %>%
+  mutate(DENIM = if_else(str_detect(merch_fabrication, "DENIM"), "Y", "N")) %>%
+  mutate(TERRY = if_else(str_detect(merch_fabrication, "TERRY"), "Y", "N")) %>%
+  #mutate(LEATHER = if_else(str_detect(merch_fabrication, "LEATHER"), "Y", "N")) %>%
+  mutate(POPLIN = if_else(str_detect(merch_fabrication, "POPLIN"), "Y", "N")) %>%
+  mutate(WOOL = if_else(str_detect(merch_fabrication, "WOOL"), "Y", "N")) %>%
+  #mutate(SEERSUCKER = if_else(str_detect(merch_fabrication, "SEERSUCKER"), "Y", "N")) %>%
+  mutate(CASHMERE = if_else(str_detect(merch_fabrication, "CASHMERE"), "Y", "N")) %>%
+  mutate(LINEN = if_else(str_detect(merch_fabrication, "LINEN"), "Y", "N")) %>%
+  #mutate(CORDUROY = if_else(str_detect(merch_fabrication, "CORDUROY"), "Y", "N")) %>%
+  mutate(POLYESTER = if_else(str_detect(merch_fabrication, "POLYESTER"), "Y", "N")) %>%
+  mutate(NYLON = if_else(str_detect(merch_fabrication, "NYLON"), "Y", "N")) %>%
+  #mutate(ELASTANE = if_else(str_detect(merch_fabrication, "ELASTANE"), "Y", "N")) %>%
+  mutate(CHAMBRAY = if_else(str_detect(merch_fabrication, "CHAMBRAY"), "Y", "N")) %>%
+  select(-c(material_number_id, material_number_desc,dtc_sku_score,na_dtc_sku_score, eu_dtc_sku_score,apac_dtc_sku_score,whsl_sku_score,na_whsl_sku_score,eu_whsl_sku_score,board, concept_id, concept_desc, global_plan_brand, global_plan_l1, global_plan_l2, global_plan_l3, global_plan_l5, global_plan_size_group, length, look, merch_fabrication, model_desc, model_long_desc, product_category, product_class, product_colorway, product_subclass, structure, gm_product)) %>%
+  select(!is.numeric)
+
+#Terry, Leather, Poplin, Wool, Seersucker, Cashmere, Linen, Corduroy, Polyester, Nylon, Elastane, Chambray
+
+prep <- prep %>%
+  mutate_if(is.character, factor) %>%
+  mutate(productive = as.factor(productive)) %>%
+  mutate(unproductive = as.factor(unproductive))
+
+skim(prep)
+
+prep %>%
+  group_by(unproductive) %>%
+  summarise(n=n(), percent = n()/nrow(prep))
+
+
+polo %>% 
+  group_by(merch_fabrication)%>%
+  summarise(n = n())
+```
+
+#Partition Data
+```{r}
+
+set.seed(008)
+
+#initial split of data
+polo_part <- initial_split(prep, prop = 0.7)
+
+#training data 
+polo_train <- training(polo_part)
+#test data 
+polo_test <- testing(polo_part)
+
+```
+
+
+#Linear Reg For Productive SKU's
+```{r}
+
+productive_recipe <- prep %>%
+  recipe(productive ~ .) %>%
+  step_rm(unproductive) %>%
+  step_impute_mode(fit,neckline,style_pattern) %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  prep()
+
+productive_recipe
+
+bake(productive_recipe %>% prep(), polo_train %>% sample_n(1000))
+
+```
+
+
+#Fit Model
+```{r}
+
+options(yardstick.event_first=FALSE)
+
+logistic_prod <-logistic_reg(mode = "classification") %>%
+  set_engine("glm")
+
+#Workflow
+logistic_workflow_prod <- workflow() %>%
+  add_recipe(productive_recipe) %>%
+  add_model(logistic_prod) %>%
+  fit(polo_train)
+
+tidy(logistic_workflow_prod) %>%
+  mutate_at(c("estimate", "std.error", "statistic", "p.value"),round, 4)
+
+```
+
+#Evaluate
+```{r}
+
+#Test
+predict(logistic_workflow_prod, polo_test, type="prob") %>%
+    bind_cols(predict(logistic_workflow_prod, polo_test, type="class")) %>%
+    bind_cols(.,polo_test)-> scored_test_logistic_prod
+
+#Train
+predict(logistic_workflow_prod, polo_train, type="prob") %>%
+    bind_cols(predict(logistic_workflow_prod, polo_train, type="class")) %>%
+    bind_cols(.,polo_train)-> scored_train_logistic_prod
+
+scored_test_logistic_prod %>%
+  metrics(productive,.pred_1, estimate=.pred_class)
+scored_train_logistic_prod %>%
+  metrics(productive,.pred_1, estimate=.pred_class)
+
+#Conf Matrix
+scored_test_logistic_prod %>% 
+  conf_mat(productive,.pred_class) %>% 
+    autoplot(type = "heatmap") %>% 
+    labs(title="confusion matrix") %>%
+    print() 
+scored_train_logistic_prod %>% 
+  conf_mat(productive,.pred_class) %>% 
+    autoplot(type = "heatmap") %>% 
+    labs(title="confusion matrix") %>%
+    print() 
+
+#ROC Chart
+scored_train_logistic_prod %>% 
+    mutate(part="training") %>%
+     bind_rows(scored_train_logistic_prod%>% mutate(part="test")) %>%
+     group_by(part) %>%
+     roc_curve(productive,.pred_1) %>%
+     autoplot() + 
+     geom_vline(xintercept=0.05,color="red",linetype = "longdash") +
+     geom_vline(xintercept=0.25,color="blue",linetype = "longdash") +
+    geom_vline(xintercept=0.75,color="green",linetype = "longdash") +
+    labs(title=paste("ROC Curve: Logistic") , x="FPR(1 - specificity)",y="TPR(recall or sensitivity)")
+
+scored_test_logistic_prod %>%
+     roc_curve(productive, .pred_1)  %>%
+     mutate(
+       fpr = round((1 - specificity), 2),
+       tpr = round(sensitivity, 3),
+       score_threshold =  round(.threshold, 3)
+     ) %>%
+     group_by(fpr) %>%
+     summarise(threshold = min(score_threshold),
+               tpr = min(tpr)) %>%
+     filter(fpr <= 0.1)
+
+ scored_test_logistic_prod %>% 
+    ggplot(aes(.pred_1, fill=productive))+
+    geom_histogram(bins=50) +
+    geom_vline(xintercept=0.5,color="red") +
+    labs(title=paste("Distribution of the Probabilty of Productive") , x=".pred_1",y="count")
+
+```
+
+
+#Logistic Reg For Un-Productive SKU's
+```{r}
+
+unproductive_recipe <- prep %>%
+  recipe(unproductive ~ .) %>%
+  step_rm(productive) %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  step_naomit() %>% 
+  prep()
+
+unproductive_recipe
+
+```
+
+#Fit Model
+```{r}
+
+options(yardstick.event_first=FALSE)
+
+logistic_unprod <-logistic_reg(mode = "classification") %>%
+  set_engine("glm")
+
+#Workflow
+logistic_workflow_unprod <- workflow() %>%
+  add_recipe(unproductive_recipe) %>%
+  add_model(logistic_unprod) %>%
+  fit(polo_train)
+
+tidy(logistic_workflow_unprod) %>%
+  mutate_at(c("estimate", "std.error", "statistic", "p.value"),round, 4)
+
+```
+
+
+#Evaluate
+```{r}
+
+#Test
+predict(logistic_workflow_unprod, polo_test, type="prob") %>%
+    bind_cols(predict(logistic_workflow_unprod, polo_test, type="class")) %>%
+    bind_cols(.,polo_test)-> scored_test_logistic_unprod
+
+#Train
+predict(logistic_workflow_unprod, polo_train, type="prob") %>%
+    bind_cols(predict(logistic_workflow_unprod, polo_train, type="class")) %>%
+    bind_cols(.,polo_train)-> scored_train_logistic_unprod
+
+scored_test_logistic_unprod %>%
+  metrics(unproductive,.pred_1, estimate=.pred_class)
+scored_train_logistic_unprod %>%
+  metrics(unproductive,.pred_1, estimate=.pred_class)
+
+
+#Conf Matrix
+scored_test_logistic_unprod %>% 
+  conf_mat(unproductive,.pred_class) %>% 
+    autoplot(type = "heatmap") %>% 
+    labs(title="confusion matrix") %>%
+    print() 
+scored_train_logistic_unprod %>% 
+  conf_mat(unproductive,.pred_class) %>% 
+    autoplot(type = "heatmap") %>% 
+    labs(title="confusion matrix") %>%
+    print() 
+```
+
+
+##Begin Random Forest Prep
+
+```{r}
+
+#model k fold splits
+kfold <- polo_train %>% sample_frac(0.2)
+kfold_splits <- vfold_cv(polo_train, v=5)
+
+rf_model <- rand_forest(trees=tune(), 
+                        min_n = tune()) %>%
+  set_engine("ranger",
+             importance="impurity") %>%
+  set_mode("classification")
+
+
+rf_wflow <-workflow() %>%
+  add_recipe(productive_recipe) %>%
+  add_model(rf_model)
+
+
+rf_search_res <- rf_wflow %>%   #model failed
+  tune_bayes(
+    resamples = kfold_splits,
+    initial = 5,
+    iter = 5, 
+    metrics = metric_set(roc_auc, accuracy),
+    control = control_bayes(no_improve = 5, verbose = TRUE)
+  )
+```
+
+## Fit Random Forest Model
+```{r}
+
+#Best: trees=1230, min_n=2
+
+lowest_rf_rmse <- rf_search_res %>%
+  select_best("roc_auc")
+
+lowest_rf_rmse
+
+rf_wflow <- finalize_workflow(
+  rf_wflow, lowest_rf_rmse
+) %>% 
+  fit(polo_train)
+
+
+```
+
+## Evaluate
+```{r}
+
+options(yardstick.event_first = FALSE)
+
+#Test
+predict(rf_wflow, polo_test, type="prob") %>%
+    bind_cols(predict(rf_wflow, polo_test, type="class")) %>%
+    bind_cols(.,polo_test)-> scored_test_rf
+
+#Train
+predict(rf_wflow, polo_train, type="prob") %>%
+    bind_cols(predict(rf_wflow, polo_train, type="class")) %>%
+    bind_cols(.,polo_train)-> scored_train_rf
+
+scored_test_rf %>%
+  metrics(productive,.pred_1, estimate=.pred_class)
+scored_train_rf %>%
+  metrics(productive,.pred_1, estimate=.pred_class)
+
+#Conf Matrix
+scored_test_rf %>% 
+  conf_mat(productive,.pred_class) %>% 
+    autoplot(type = "heatmap") %>% 
+    labs(title="confusion matrix") %>%
+    print() 
+scored_train_rf %>% 
+  conf_mat(productive,.pred_class) %>% 
+    autoplot(type = "heatmap") %>% 
+    labs(title="confusion matrix") %>%
+    print() 
+
+#ROC Chart
+scored_train_rf %>% 
+    mutate(part="training") %>%
+     bind_rows(scored_test_rf%>% mutate(part="test")) %>%
+     group_by(part) %>%
+     roc_curve(productive,.pred_1) %>%
+     autoplot() + 
+     geom_vline(xintercept=0.05,color="red",linetype = "longdash") +
+     geom_vline(xintercept=0.25,color="blue",linetype = "longdash") +
+    geom_vline(xintercept=0.75,color="green",linetype = "longdash") +
+    labs(title=paste("ROC Curve: Logistic") , x="FPR(1 - specificity)",y="TPR(recall or sensitivity)")
+
+scored_test_rf %>%
+     roc_curve(productive, .pred_1)  %>%
+     mutate(
+       fpr = round((1 - specificity), 2),
+       tpr = round(sensitivity, 3),
+       score_threshold =  round(.threshold, 3)
+     ) %>%
+     group_by(fpr) %>%
+     summarise(threshold = min(score_threshold),
+               tpr = min(tpr)) %>%
+     filter(fpr <= 0.1)
+
+scored_test_rf %>% 
+    ggplot(aes(.pred_1, fill=productive))+
+    geom_histogram(bins=50) +
+    geom_vline(xintercept=0.5,color="red") +
+    labs(title=paste("Distribution of the Probabilty of Productive SKU's") , x=".pred_1",y="count")
+
+```
+
+## Look into Variable Importance
+```{r}
+
+rf_wflow %>%
+  pull_workflow_fit() %>%
+  vip(10)
+
+#fashion_degree, fit, logo, style_pattern,pricing, super_color, fiber_content
+
+rf_explainer <- explain_tidymodels(
+  rf_wflow,
+  data = polo_train ,
+  y = polo_train$productive ,
+  verbose = TRUE)
+
+#Loop through important variables to create some partial dependency plots
+
+variables_rf <- c("fashion_degree", "style_pattern", "logo", "fit", "super_color", "fiber_content","pricing")
+
+for (i in variables_rf) {
+  
+  pdp_i_rf <- model_profile(
+  rf_explainer,
+  variables = c(i))
+
+plot <- as_tibble(pdp_i_rf$agr_profiles) %>%
+  mutate(profile_variable = `_x_`,
+         avg_prediction_impact = `_yhat_`) %>%
+  ggplot(aes(x=profile_variable, y=avg_prediction_impact)) +
+  geom_col() +
+  labs(
+    x = i,
+     y = " Average prediction Impact ",
+    fill="#FF9999", colour="black",
+    title = paste("Partial dependence plot on", i) ,
+    subtitle = paste("How does", i, "impact predictions (on average)" )
+  )+
+  theme(axis.text.x = element_text(angle=45, hjust=1, vjust=1))
+        
+print(plot)
+}
+```
+#plot it
+```{r}
+
+
+
+explain_prediction <- function(single_record){
+  # step 3. run the explainer 
+record_shap <- predict_parts(explainer = rf_explainer, 
+                               new_observation = single_record,
+                             y=polo_test$productive,
+                               type = "shap"
+                             )
+
+# step 4. plot it. 
+# you notice you don't get categorical values ...  
+record_shap %>% plot() %>% print()
+
+# --- more involved explanations with categories. ---- 
+
+# step 4a.. convert breakdown to a tibble so we can join it
+record_shap %>%
+  as_tibble() -> shap_data 
+
+# step 4b. transpose your single record prediction 
+single_record %>% 
+ gather(key="variable_name",value="value") -> prediction_data 
+
+# step 4c. get a predicted probability for plot 
+prediction_prob <- single_record[,".pred_1"] %>% mutate(.pred_1 = round(.pred_1,3)) %>% pull() 
+
+# step 5. plot it.
+shap_data %>% 
+  inner_join(prediction_data) %>%
+  mutate(variable = paste(variable_name,value,sep = ": ")) %>% 
+  group_by(variable) %>%
+  summarize(contribution = mean(contribution)) %>%
+  mutate(contribution = round(contribution,3),
+         sign = if_else(contribution < 0, "neg","pos")) %>%
+  ggplot(aes(y=reorder(variable, contribution), x= contribution, fill=sign)) +
+  geom_col() + 
+  geom_text(aes(label=contribution))+
+  labs(
+    title = "SHAPLEY explainations",
+    subtitle = paste("predicted probablity = ",prediction_prob) ,
+                    x="contribution",
+                    y="features")
+  
+}
+
+
+top_5_tp <- scored_test_rf %>%
+  filter(.pred_class == 1) %>%
+  filter(productive == 1) %>%
+  slice_max(.pred_1,n=5)
+
+# r_5_fp <- scored_test_rf %>%
+#   filter(.pred_class == 1) %>%
+#   filter(productive != 1) %>%
+#   slice_max(.pred_1,n=5)
+# 
+# top_5_fn <- scored_test_rf %>%
+#   filter(.pred_class != 1 ) %>%
+#   filter(productive == 1) %>%
+#   slice_max(.pred_1,n=5)
+
+
+# repeat for FP and FN 
+for (row in 1:nrow(top_5_tp)) {
+    s_record <- top_5_tp[row,]
+    explain_prediction(s_record)
+} 
+
+# for (row in 1:nrow(top_5_fp)) {
+#     s_record <- top_5_fp[row,]
+#     explain_prediction(s_record)
+# } 
+# 
+# for (row in 1:nrow(top_5_fn)) {
+#     s_record <- top_5_fn[row,]
+#     explain_prediction(s_record)
+# } 
+
+
+```
